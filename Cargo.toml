@@ -8,6 +8,7 @@ edition = "2024"
 rust-version = "1.95"
 description = "A standalone Blender camera importer for MikuMikuDance"
 publish = false
+license = "Apache-2.0"
 
 [profile.dev]
 opt-level = 0
