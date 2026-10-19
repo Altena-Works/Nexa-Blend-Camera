@@ -1,38 +1,33 @@
-v0.1.0: Nexaから独立した、ビルド済みWindows x64向けのカメラ取込み検証版。
+v0.2.0: 変換したカメラVMDを起動元MMDへ渡す処理を追加した、Windows x64検証版です。
 
 ## ダウンロード（ビルド不要）
 
 | ファイル | 内容 |
 |---|---|
-| `Nexa-Camera-0.1.0-x64.zip` | Windows x64 plugin and worker; unsigned |
+| `Nexa-Camera-0.2.0-x64.zip` | Windows x64 plugin and worker; unsigned |
 | `SHA256SUMS.txt` | SHA-256 checksum for the ZIP |
 
-ZIPを展開し、`NexaCamera`フォルダーをMMDの`Plugin`へ配置してください。Rust・MSVCによるビルドは不要です。MMD x64、MMDPlugin v0.41 x64、Blenderは別途必要です。`Source code`の自動生成ZIPには実行ファイルが入っていません。
+ZIPを展開し、`NexaCamera`をMMDの`Plugin`へ配置します。MMDを終了してからDLLとexeを両方更新してください。MMD 9.32 x64・MMDPlugin v0.41 x64・Blenderは別途必要です。同梱`INSTALL.md`を参照してください。GitHubの`Source code`には実行ファイルがありません。
 
-ZIP SHA-256: `6dcb63a72534fbd28fb1a71e43c696f489a80d15e251a0e68245d2eea0a53c28`
+ZIP SHA-256: `d0d809d1663c5f3b5aa60bac4f0d7f4acf0761cad19f7a262829b54487421212`
 
-## 追加 / Added
+## 追加
 
-- Nexaからカメラ変換とMMDアダプターを分離。
-- 「Nexa Camera → blendを取り込み」から`.blend`専用の標準ファイル選択を表示。
-- カメラVMD生成用の設定画面とCLI。
+- 変換したカメラVMDを起動元MMDの標準ファイル読み込み経路へ渡す処理。
+- カメラ・照明操作モードとcamera-only形式の確認、完了通知の重複・取消・終了時の処理。
 
-## 変更 / Changed
+## 確認範囲と制限
 
-- Nexaと同じApache-2.0を適用し、共通の謝辞を掲載。
-- GitHub Releasesからビルド済みZIPを入手する手順を追加。
+Rustテスト19件が合格し、修正後の対象12件も合格しています。Blenderを必要とする既存2テストは未実行です。本ZIPはmainのd21b256からRust 1.95.0で新規ビルドしたv0.2.0で、PEのx64形式、ZIP内全ファイルの一致、workerのヘルプ起動を確認しました。
 
-## 修正 / Fixed
+**実MMDでの自動読み込みと既存キー・モデル・ライトの保持は確認待ちです。** 自動配送の通知は、MMDが読み込みに成功した証明ではありません。MMDをカメラ・照明・アクセサリ操作にして使用し、既存の作業は先に保存してください。読み込まれない場合は保存済みVMDをMMDの標準モーション読み込みで開けます。
 
-- MMDの標準メニュー通知を直接受け、workerを起動する経路を追加。
-- 終了時の通知接続解除と、既存出力の保護。
+平行投影の倍率差と透視投影の位置差は未解決です。モデル・モデルアニメーション・ライトは取り込みません。未署名のWindows x64版で、最低対応Windowsバージョンは未確定です。
 
-## 確認範囲と既知の制限
+## ライセンス
 
-MMDメニューから`.blend`の標準ファイル選択が開くことは利用者が確認済みです。Rustの独立構成では16テストとreleaseビルドが合格し、Blenderを起動する2テストは未実施です。ZIPはメニュー操作を確認した試験版と同じDLL・workerを収録しています。
+自作部分はApache-2.0です。第三者通知を同梱しています。
 
-現行GUIからの変換完了は未確認です。平行投影の倍率差と透視投影の描画位置差が残っており、Blenderと実MMDの投影一致は未解決です。モデル・モデルアニメーション・ライト・物理・エフェクトの取込みは含みません。カメラVMDの読込みはMMDの標準操作で行います。
+## 謝辞
 
-## ライセンスと謝辞
-
-Nexaと同じApache-2.0を自作部分に適用し、第三者の通知を保持しています。MMDの作者である樋口優氏と関連開発者・クリエイターへの共通の謝辞は、同梱READMEとACKNOWLEDGEMENTS.mdの末尾に掲載しています。
+MikuMikuDance（MMD）の作者である樋口優氏をはじめ、MMDPlugin、MMEffect、Blender、Bullet、Saba、GLMの開発者・貢献者、モデル・モーション・エフェクト・資料の制作者、MMDコミュニティの皆様に感謝します。
