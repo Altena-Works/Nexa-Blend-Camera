@@ -1,5 +1,7 @@
 # Nexa Camera v0.1.0
 
+Nexa Cameraは、MikuMikuDance（MMD）の全バイナリのリバースエンジニアリングと、その成果に基づく改良を目指す「Nexa」計画から生まれた独立成果物です。
+
 Blenderの`.blend`から評価済みカメラを取り出し、MikuMikuDance用のカメラVMDを生成するWindows x64向けプラグインです。Nexa本体やsolverに依存しません。
 
 **v0.1.0は検証版です。** MMDのメニューからファイル選択が開くことは確認済みですが、現行GUI経由の変換完了と、実MMDでの投影一致は未確認です。平行投影には既知の変換不一致があります。
