@@ -1,0 +1,6 @@
+/target/
+/dist/
+*.blend
+*.blend1
+*.vmd
+*.pmx
