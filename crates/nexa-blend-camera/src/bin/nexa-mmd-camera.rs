@@ -5,10 +5,20 @@ const HELP:&str="nexa-mmd-camera --blender EXE --output CAMERA.vmd [--scene NAME
 fn run()->Result<(),String>{
     let args:Vec<_>=std::env::args_os().skip(1).collect();
     if args.len()==1&&args[0]==OsStr::new("--help"){println!("{HELP}");return Ok(());}
-    if args.len()==1&&args[0]==OsStr::new("--gui"){
+    let plugin=args.len()==2&&args[0]==OsStr::new("--gui")&&args[1]==OsStr::new("--plugin-result");
+    if (args.len()==1&&args[0]==OsStr::new("--gui"))||plugin{
         #[cfg(windows)] {if let Some(options)=nexa_blend_camera::gui::show()? {
-            match convert(&options){Ok(report)=>nexa_blend_camera::gui::message(&report,false),Err(e)=>{nexa_blend_camera::gui::message(&e,true);return Err(e);}}
-        }return Ok(());}
+            match convert(&options){Ok(report)=>{
+                if plugin {
+                    use std::io::Write;
+                    let path=options.output.to_str().ok_or("output path must be Unicode")?;
+                    if path.len()+9>131_072{return Err("output path is too long for automatic loading".into());}
+                    let mut out=std::io::stdout().lock();
+                    out.write_all(b"NEXAVMD1\n").and_then(|_|out.write_all(path.as_bytes())).map_err(|e|e.to_string())?;
+                }else{nexa_blend_camera::gui::message(&report,false);}
+            },Err(e)=>{nexa_blend_camera::gui::message(&e,true);return Err(e);}}
+        }else if plugin {use std::io::Write;std::io::stdout().write_all(b"NEXACANCEL1").map_err(|e|e.to_string())?;}
+        return Ok(());}
         #[cfg(not(windows))] return Err("native GUI requires Windows".into());
     }
     let mut options=Options {blender:PathBuf::new(),source:PathBuf::new(),output:PathBuf::new(),scene:None,camera:None,

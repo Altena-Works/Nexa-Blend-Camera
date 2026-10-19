@@ -11,7 +11,7 @@ unsafe impl Sync for VTable {}
     trace_slot:AtomicU32,trace_digest:AtomicU64,
 }
 // All notification paths share one child, including the native window callback.
-static WORKER:Mutex<Option<Child>>=Mutex::new(None);
+static WORKER:Mutex<Option<auto_load::Pending>>=Mutex::new(None);
 type SubclassProc=unsafe extern "system" fn(H,u32,usize,isize,usize,usize)->isize;
 #[repr(C)] struct Creation {adapter:u32,device_type:i32,window:H,behavior:u32}
 #[repr(C)] struct Cwp {lparam:isize,wparam:usize,message:u32,window:H}
@@ -60,6 +60,7 @@ const _:()={assert!(std::mem::size_of::<Creation>()==24);assert!(std::mem::size_
 }
 mod callbacks;
 mod menu_command;
+mod auto_load;
 #[cfg(test)] mod queued_menu_tests;
 #[cfg(test)] mod native_menu_tests;
 fn wide(s:&str)->Vec<u16>{s.encode_utf16().chain(Some(0)).collect()}
@@ -99,6 +100,7 @@ unsafe fn contains_id(menu:H,id:u32,depth:u32)->bool{
 impl Plugin {
     fn remove_menu(&self){
         let window=self.window.load(Ordering::Relaxed) as H;
+        auto_load::cancel(window);
         let id=self.command.swap(0,Ordering::Relaxed);
         let popup=self.popup.swap(0,Ordering::Relaxed) as H;
         if popup.is_null(){return;}
@@ -142,28 +144,33 @@ impl Plugin {
         }
     }
     fn launch(&self)->Result<(),String>{
-        launch_worker()
+        launch_worker(self.window.load(Ordering::Relaxed) as H)
     }
 }
-fn launch_worker()->Result<(),String>{
+fn launch_worker(window:H)->Result<(),String>{
         let mut worker=WORKER.lock().map_err(|_|"worker state unavailable")?;
-        if let Some(child)=worker.as_mut(){if child.try_wait().map_err(|e|e.to_string())?.is_none(){return Ok(());}}
+        if worker.is_some(){return Ok(());}
+        if auto_load::message_id()==0{return Err("cannot register completion notification".into());}
         let mut module=null_mut();
         if unsafe{GetModuleHandleExW(6,create3 as *const () as *const u16,&mut module)}==0{return Err("cannot locate plugin module".into());}
         let mut path=vec![0u16;32768];let count=unsafe{GetModuleFileNameW(module,path.as_mut_ptr(),path.len() as u32)} as usize;
         if count==0||count>=path.len(){return Err("cannot locate plugin directory".into());}path.truncate(count);
         let mut exe=PathBuf::from(OsString::from_wide(&path));exe.set_file_name("nexa-mmd-camera.exe");
-        *worker=Some(Command::new(&exe).arg("--gui").creation_flags(0x08000000)
-            .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn()
-            .map_err(|e|format!("{}: {e}",exe.display()))?);Ok(())
+        let child=Command::new(&exe).args(["--gui","--plugin-result"]).creation_flags(0x08000000)
+            .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn()
+            .map_err(|e|format!("{}: {e}",exe.display()))?;
+        *worker=Some(auto_load::start(window,child)?);Ok(())
 }
 unsafe extern "system" fn native_menu(h:H,m:u32,w:usize,l:isize,id:usize,data:usize)->isize{
     if m==0x82 {
+        auto_load::cancel(h);
         unsafe{RemoveWindowSubclass(h,native_menu,id);}
+    }else if m==auto_load::message_id() && auto_load::complete(h,w) {
+        return 0;
     }else if m==0x111 && id==data && menu_command::matches(data as u32,h as isize,h as isize,m,w,l)
         && unsafe{contains_id(GetMenu(h),data as u32,0)} {
         #[cfg(not(test))]
-        let result=launch_worker();
+        let result=launch_worker(h);
         #[cfg(test)]
         let result=queued_menu_tests::launch_result();
         if let Err(e)=result{unsafe{MessageBoxW(h,wide(&e).as_ptr(),wide("Nexa Camera").as_ptr(),0x10);}}
