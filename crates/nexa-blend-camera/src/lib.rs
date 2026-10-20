@@ -295,5 +295,7 @@ pub mod vmd;
 pub mod worker;
 #[cfg(windows)]
 pub mod gui;
+#[cfg(windows)]
+pub mod blender_detection;
 #[cfg(test)]
 mod conversion_tests;

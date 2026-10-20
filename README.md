@@ -32,7 +32,7 @@ Blenderの`.blend`からカメラVMDを生成する、Windows x64向けMMDプラ
 
 ### 開発版
 
-Blender実行ファイルの自動検出は次期版に向けて開発中です。公開済みv0.2.0では手動指定が必要です。
+ソース版ではインストール済みBlenderの実行ファイルを自動検出します。複数候補の選択と手動指定に対応し、Blender 4.5.4で設定画面への初期入力とGUI変換を実機確認しています。公開済みv0.2.0のZIPには含まれず、手動指定が必要です。
 
 Rust 1.95.0・MSVC x64環境で`.\scripts\build.ps1 -Test`を実行するとビルドできます。[検証状況](VERIFICATION.md)と[変更履歴](CHANGELOG.md)も参照してください。
 
@@ -74,7 +74,7 @@ The input blend file is not saved or modified, and automatic execution of embedd
 
 ### Development
 
-Automatic Blender executable detection is in development for a future version. Published v0.2.0 requires manual selection.
+The source version automatically detects installed Blender executables, supports selecting among multiple candidates, and retains manual selection. Initial path entry and GUI conversion have been verified with Blender 4.5.4 in MMD. The published v0.2.0 ZIP does not include detection and requires manual selection.
 
 To build, use Rust 1.95.0 and the MSVC x64 build tools and run `.\scripts\build.ps1 -Test`. See [verification status](VERIFICATION.md) and the [changelog](CHANGELOG.md).
 

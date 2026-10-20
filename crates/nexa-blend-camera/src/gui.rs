@@ -32,7 +32,7 @@ const _:()={assert!(size_of::<Class>()==72);assert!(size_of::<Msg>()==48);assert
 #[link(name="comdlg32")] unsafe extern "system" {
     fn GetOpenFileNameW(o:*mut OpenFile)->i32;fn GetSaveFileNameW(o:*mut OpenFile)->i32;fn CommDlgExtendedError()->u32;
 }
-struct State {base:PathBuf,value:Option<Options>}
+struct State {base:PathBuf,value:Option<Options>,blenders:Vec<crate::blender_detection::Candidate>}
 struct Window {hwnd:H,instance:H,class:Vec<u16>}
 impl Drop for Window {fn drop(&mut self){unsafe {if IsWindow(self.hwnd)!=0 {DestroyWindow(self.hwnd);}UnregisterClassW(self.class.as_ptr(),self.instance);}}}
 fn wide(s:&str)->Vec<u16>{s.encode_utf16().chain(Some(0)).collect()}
@@ -96,8 +96,25 @@ fn set_path(h:H,id:i32,path:&Path)->Result<(),String>{
 fn browse(h:H,id:i32)->Result<(),String>{
     if let Some(path)=select_file(h,id,&read(h,id))?{set_path(h,id,&path)?;}Ok(())
 }
+fn fill_blenders(h:H,candidates:&[crate::blender_detection::Candidate])->Result<(),String>{
+    if let Some(first)=candidates.first(){
+        for candidate in candidates{unsafe{SendMessageW(GetDlgItem(h,22),0x143,0,wide(&candidate.label()).as_ptr() as isize);}}
+        unsafe{SendMessageW(GetDlgItem(h,22),0x160,700,0);SendMessageW(GetDlgItem(h,22),0x14e,0,0);}
+        set_path(h,10,&first.path)?;
+    }else{unsafe{SendMessageW(GetDlgItem(h,22),0x143,0,wide("未検出・手動指定").as_ptr() as isize);SendMessageW(GetDlgItem(h,22),0x14e,0,0);}}
+    Ok(())
+}
 unsafe extern "system" fn procedure(h:H,m:u32,w:usize,l:isize)->isize{
     if m==2{unsafe{PostQuitMessage(0);}return 0;}
+    if m==0x111&&(w&0xffff)==22&&(w>>16)==1{
+        let state=unsafe{GetWindowLongPtrW(h,-21)} as *mut State;
+        let selected=unsafe{SendMessageW(GetDlgItem(h,22),0x147,0,0)};
+        if !state.is_null()&&selected>=0{
+            if let Some(path)=unsafe{(&(*state).blenders).get(selected as usize)}.map(|c|c.path.clone()){
+                if let Err(e)=set_path(h,10,&path){show_message(h,&e,true);}
+            }
+        }return 0;
+    }
     if m==0x111&&(w>>16)==0{
         match (w&0xffff) as i32{
             id@110..=112=>{if let Err(e)=browse(h,id-100){show_message(h,&e,true);}return 0;}
@@ -114,7 +131,7 @@ pub fn show()->Result<Option<Options>,String>{
     show_settings(&source)
 }
 fn show_settings(source:&Path)->Result<Option<Options>,String>{
-    let mut state=Box::new(State{base:std::env::current_dir().map_err(|e|e.to_string())?,value:None});
+    let mut state=Box::new(State{base:std::env::current_dir().map_err(|e|e.to_string())?,value:None,blenders:crate::blender_detection::detect()});
     let name=wide("NexaMmdCameraWorkerWindow");let instance=unsafe{GetModuleHandleW(null())};
     if instance.is_null(){return Err(error("GetModuleHandleW"));}
     let class=Class{style:0,proc:Some(procedure),cls:0,wnd:0,instance,icon:null_mut(),cursor:unsafe{LoadCursorW(null_mut(),32512usize as _)},background:16usize as H,menu:null(),name:name.as_ptr()};
@@ -129,8 +146,10 @@ fn show_settings(source:&Path)->Result<Option<Options>,String>{
     if unsafe{GetWindowLongPtrW(hwnd,-21)}!=pointer{return Err("GUI state setup failed".into());}
     for (row,(id,label)) in [(10,"Blender実行ファイル (.exe)"),(11,"入力 (.blend)"),(12,"カメラ出力 (.vmd)")].into_iter().enumerate(){
         let y=16+row as i32*58;control(hwnd,"STATIC",label,0,[20,y,720,20],0)?;
-        control(hwnd,"EDIT","",id,[20,y+22,610,26],0x10080)?;control(hwnd,"BUTTON","参照...",id+100,[640,y+21,100,28],0x10000)?;
+        control(hwnd,"EDIT","",id,[20,y+22,if id==10{435}else{610},26],0x10080)?;control(hwnd,"BUTTON","参照...",id+100,[640,y+21,100,28],0x10000)?;
     }
+    control(hwnd,"COMBOBOX","",22,[465,38,165,220],0x10003)?;
+    fill_blenders(hwnd,&state.blenders)?;
     set_path(hwnd,11,source)?;
     set_path(hwnd,12,&source.with_extension("camera.vmd"))?;
     for (id,label,x,y,width,value) in [
@@ -150,4 +169,28 @@ fn show_settings(source:&Path)->Result<Option<Options>,String>{
         _=>unsafe{if IsDialogMessageW(hwnd,&mut msg)==0{TranslateMessage(&msg);DispatchMessageW(&msg);}}
     }}
     Ok(state.value.take())
+}
+
+#[cfg(test)] mod detection_gui_tests{
+    use super::*;
+    #[test] fn hidden_controls_prefill_switch_and_allow_manual_path(){
+        // Only a private, invisible test window; no input injection into user apps.
+        let name=wide("NexaBlenderDetectionControlsTest");let instance=unsafe{GetModuleHandleW(null())};
+        let class=Class{style:0,proc:Some(procedure),cls:0,wnd:0,instance,icon:null_mut(),cursor:null_mut(),background:16usize as H,menu:null(),name:name.as_ptr()};
+        assert_ne!(unsafe{RegisterClassW(&class)},0);
+        let h=unsafe{CreateWindowExW(0,name.as_ptr(),name.as_ptr(),0,0,0,760,512,null_mut(),null_mut(),instance,null_mut())};assert!(!h.is_null());
+        let mut state=Box::new(State{base:PathBuf::from("C:/"),value:None,blenders:vec![
+            crate::blender_detection::Candidate{path:PathBuf::from("C:/Blender 4.5/blender.exe"),version:vec![4,5]},
+            crate::blender_detection::Candidate{path:PathBuf::from("C:/Blender 4.2/blender.exe"),version:vec![4,2]},
+        ]});
+        let window=Window{hwnd:h,instance,class:name};unsafe{SetWindowLongPtrW(h,-21,&mut *state as *mut State as isize);}
+        control(h,"EDIT","",10,[20,38,435,26],0x10080).unwrap();control(h,"COMBOBOX","",22,[465,38,165,220],0x10003).unwrap();
+        fill_blenders(h,&state.blenders).unwrap();assert_eq!(text(h,10).unwrap(),"C:/Blender 4.5/blender.exe");
+        unsafe{SendMessageW(GetDlgItem(h,22),0x14e,1,0);SendMessageW(h,0x111,(1<<16)|22,0);}
+        assert_eq!(text(h,10).unwrap(),"C:/Blender 4.2/blender.exe");
+        set_path(h,10,Path::new("C:/Portable/blender.exe")).unwrap();assert_eq!(text(h,10).unwrap(),"C:/Portable/blender.exe");
+        unsafe{SendMessageW(GetDlgItem(h,22),0x14b,0,0);}fill_blenders(h,&[]).unwrap();
+        assert_eq!(text(h,10).unwrap(),"C:/Portable/blender.exe");
+        drop(window);
+    }
 }

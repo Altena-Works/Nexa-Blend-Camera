@@ -5,6 +5,10 @@ const HELP:&str="nexa-mmd-camera --blender EXE --output CAMERA.vmd [--scene NAME
 fn run()->Result<(),String>{
     let args:Vec<_>=std::env::args_os().skip(1).collect();
     if args.len()==1&&args[0]==OsStr::new("--help"){println!("{HELP}");return Ok(());}
+    #[cfg(windows)]
+    if args.len()==1&&args[0]==OsStr::new("--detect-blender"){
+        for candidate in nexa_blend_camera::blender_detection::detect(){println!("{}",candidate.label());}return Ok(());
+    }
     let plugin=args.len()==2&&args[0]==OsStr::new("--gui")&&args[1]==OsStr::new("--plugin-result");
     if (args.len()==1&&args[0]==OsStr::new("--gui"))||plugin{
         #[cfg(windows)] {if let Some(options)=nexa_blend_camera::gui::show()? {
