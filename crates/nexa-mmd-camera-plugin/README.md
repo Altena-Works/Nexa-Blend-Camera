@@ -9,6 +9,6 @@ non-camera operation mode and modal windows prevent automatic delivery.
 Runtime loading and preservation of existing keys remain unverified in MMD;
 delivery alone is not a confirmed import.
 
-## 謝辞
+## Acknowledgements
 
-MikuMikuDance（MMD）の作者である樋口優氏をはじめ、MMDPlugin、MMEffect、Blender、Bullet、Saba、GLMの開発者・貢献者、モデル・モーション・エフェクト・資料の制作者、MMDコミュニティの皆様に感謝します。
+We thank MikuMikuDance (MMD) creator 樋口優, the developers and contributors of MMDPlugin, MMEffect, Blender, Bullet, Saba and GLM, the creators of models, motions, effects and reference materials, and the MMD community.
