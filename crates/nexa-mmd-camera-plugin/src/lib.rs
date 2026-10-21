@@ -1,5 +1,8 @@
 //! Pure Rust adapter for the pinned Windows x64 MMDPlugin DLL3 C++ interface.
 #![cfg(all(windows,target_arch="x86_64"))]
+#[path="../../nexa-blend-camera/src/i18n.rs"]
+mod i18n;
+use i18n::{Language,Text,external};
 use std::{ffi::{c_void,c_char,OsString},os::windows::{ffi::OsStringExt,process::CommandExt},path::PathBuf,
     ptr::{null,null_mut},process::{Child,Command,Stdio},sync::{Mutex,atomic::{AtomicIsize,AtomicU32,AtomicU64,Ordering}}};
 type H=*mut c_void;
@@ -45,6 +48,7 @@ const _:()={assert!(std::mem::size_of::<Creation>()==24);assert!(std::mem::size_
     fn GetMenu(h:H)->H;fn CreatePopupMenu()->H;fn AppendMenuW(m:H,f:u32,id:usize,t:*const u16)->i32;
     fn GetMenuItemCount(m:H)->i32;fn GetMenuItemID(m:H,p:i32)->u32;fn GetSubMenu(m:H,p:i32)->H;
     fn RemoveMenu(m:H,p:u32,f:u32)->i32;fn DestroyMenu(m:H)->i32;fn DrawMenuBar(h:H)->i32;
+    fn ModifyMenuW(m:H,p:u32,f:u32,id:usize,t:*const u16)->i32;
     fn RegisterWindowMessageW(s:*const u16)->u32;fn IsWindow(h:H)->i32;fn MessageBoxW(h:H,t:*const u16,c:*const u16,f:u32)->i32;
     fn GetWindowThreadProcessId(h:H,p:*mut u32)->u32;
 }
@@ -64,6 +68,20 @@ mod auto_load;
 #[cfg(test)] mod queued_menu_tests;
 #[cfg(test)] mod native_menu_tests;
 fn wide(s:&str)->Vec<u16>{s.encode_utf16().chain(Some(0)).collect()}
+type EnglishMode=unsafe extern "C" fn()->bool;
+fn language_from_export(get:Option<EnglishMode>)->Language{
+    if get.is_some_and(|get|unsafe{get()}){Language::En}else{Language::Ja}
+}
+fn host_language()->Language{
+    let module=unsafe{GetModuleHandleW(null())};
+    if module.is_null(){return Language::Ja;}
+    let address=unsafe{GetProcAddress(module,c"ExpGetEnglishMode".as_ptr().cast())};
+    language_from_export(if address.is_null(){None}else{Some(unsafe{std::mem::transmute::<*mut c_void,EnglishMode>(address)})})
+}
+fn worker_args(language:Language)->[&'static str;4]{["--gui","--plugin-result","--language",language.code()]}
+fn update_menu_text(popup:H,id:u32,language:Language){
+    if !popup.is_null()&&id!=0{unsafe{ModifyMenuW(popup,0,0x400,id as usize,wide(language.text(Text::Import)).as_ptr());}}
+}
 unsafe fn record(this:*mut Plugin,slot:u32,args:&[u64]){
     #[cfg(feature="abi-audit")] {
         let mut digest=0xcbf29ce484222325u64;
@@ -119,7 +137,10 @@ impl Plugin {
         }
     }
     fn add_menu(&self){
-        if self.popup.load(Ordering::Relaxed)!=0{return;}
+        let language=host_language();
+        if self.popup.load(Ordering::Relaxed)!=0{
+            update_menu_text(self.popup.load(Ordering::Relaxed) as H,self.command.load(Ordering::Relaxed),language);return;
+        }
         let window=self.window.load(Ordering::Relaxed) as H;
         unsafe {
             if window.is_null()||IsWindow(window)==0{return;}
@@ -132,12 +153,12 @@ impl Plugin {
             if GetWindowThreadProcessId(window,null_mut())!=GetCurrentThreadId()
                 || GetModuleHandleExW(5,native_menu as *const () as *const u16,&mut module)==0
                 || SetWindowSubclass(window,native_menu,id as usize,id as usize)==0 {
-                MessageBoxW(window,wide("Nexa Camera: メニュー通知を接続できませんでした。").as_ptr(),wide("Nexa Camera").as_ptr(),0x10);
+                MessageBoxW(window,wide(language.text(Text::MenuFailed)).as_ptr(),wide(language.text(Text::Title)).as_ptr(),0x10);
                 return;
             }
             let popup=CreatePopupMenu();if popup.is_null(){RemoveWindowSubclass(window,native_menu,id as usize);return;}
-            if AppendMenuW(popup,0,id as usize,wide("blendを取り込み").as_ptr())==0
-                || AppendMenuW(menu,0x10,popup as usize,wide("Nexa Camera").as_ptr())==0 {
+            if AppendMenuW(popup,0,id as usize,wide(language.text(Text::Import)).as_ptr())==0
+                || AppendMenuW(menu,0x10,popup as usize,wide("Nexa Blend Camera").as_ptr())==0 {
                 DestroyMenu(popup);RemoveWindowSubclass(window,native_menu,id as usize);return;
             }
             self.command.store(id,Ordering::Relaxed);self.popup.store(popup as isize,Ordering::Relaxed);DrawMenuBar(window);
@@ -148,21 +169,28 @@ impl Plugin {
     }
 }
 fn launch_worker(window:H)->Result<(),String>{
-        let mut worker=WORKER.lock().map_err(|_|"worker state unavailable")?;
+        let language=host_language();
+        let mut worker=WORKER.lock().map_err(|_|language.text(Text::WorkerState))?;
         if worker.is_some(){return Ok(());}
-        if auto_load::message_id()==0{return Err("cannot register completion notification".into());}
+        if auto_load::message_id()==0{return Err(language.text(Text::RegisterCompletion).into());}
         let mut module=null_mut();
-        if unsafe{GetModuleHandleExW(6,create3 as *const () as *const u16,&mut module)}==0{return Err("cannot locate plugin module".into());}
+        if unsafe{GetModuleHandleExW(6,create3 as *const () as *const u16,&mut module)}==0{return Err(language.text(Text::PluginModule).into());}
         let mut path=vec![0u16;32768];let count=unsafe{GetModuleFileNameW(module,path.as_mut_ptr(),path.len() as u32)} as usize;
-        if count==0||count>=path.len(){return Err("cannot locate plugin directory".into());}path.truncate(count);
+        if count==0||count>=path.len(){return Err(language.text(Text::PluginDirectory).into());}path.truncate(count);
         let mut exe=PathBuf::from(OsString::from_wide(&path));exe.set_file_name("nexa-mmd-camera.exe");
-        let child=Command::new(&exe).args(["--gui","--plugin-result"]).creation_flags(0x08000000)
+        let child=Command::new(&exe).args(worker_args(language)).creation_flags(0x08000000)
             .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn()
-            .map_err(|e|format!("{}: {e}",exe.display()))?;
-        *worker=Some(auto_load::start(window,child)?);Ok(())
+            .map_err(|e|language.format(Text::WorkerLaunch,&[("path",&exe.display().to_string()),("detail",&e.to_string())]))?;
+        *worker=Some(auto_load::start(window,child,language)?);Ok(())
 }
 unsafe extern "system" fn native_menu(h:H,m:u32,w:usize,l:isize,id:usize,data:usize)->isize{
-    if m==0x82 {
+    if m==0x116||m==0x117 {
+        let menu=unsafe{GetMenu(h)};
+        for index in 0..unsafe{GetMenuItemCount(menu)}{
+            let popup=unsafe{GetSubMenu(menu,index)};
+            if !popup.is_null()&&unsafe{GetMenuItemID(popup,0)}==data as u32{update_menu_text(popup,data as u32,host_language());break;}
+        }
+    }else if m==0x82 {
         auto_load::cancel(h);
         unsafe{RemoveWindowSubclass(h,native_menu,id);}
     }else if m==auto_load::message_id() && auto_load::complete(h,w) {
@@ -173,7 +201,7 @@ unsafe extern "system" fn native_menu(h:H,m:u32,w:usize,l:isize,id:usize,data:us
         let result=launch_worker(h);
         #[cfg(test)]
         let result=queued_menu_tests::launch_result();
-        if let Err(e)=result{unsafe{MessageBoxW(h,wide(&e).as_ptr(),wide("Nexa Camera").as_ptr(),0x10);}}
+        if let Err(e)=result{unsafe{MessageBoxW(h,wide(&e).as_ptr(),wide("Nexa Blend Camera").as_ptr(),0x10);}}
         return 0;
     }
     unsafe{DefSubclassProc(h,m,w,l)}
@@ -182,7 +210,7 @@ impl Drop for Plugin {fn drop(&mut self){self.remove_menu();}}
 unsafe extern "system" fn deleting_destructor(this:*mut Plugin,flags:u32)->*mut Plugin{
     if !this.is_null(){if flags&1!=0{unsafe{drop(Box::from_raw(this));}}else{unsafe{std::ptr::drop_in_place(this);}}}this
 }
-unsafe extern "system" fn title(this:*mut Plugin)->*const c_char{unsafe{record(this,239,&[]);}c"Nexa Blender Camera".as_ptr()}
+unsafe extern "system" fn title(this:*mut Plugin)->*const c_char{unsafe{record(this,239,&[]);}c"Nexa Blend Camera".as_ptr()}
 unsafe extern "system" fn start(this:*mut Plugin){unsafe{record(this,240,&[]);(*this).add_menu();}}
 unsafe extern "system" fn stop(this:*mut Plugin){unsafe{record(this,241,&[]);(*this).remove_menu();}}
 fn handle_menu_command(plugin: &Plugin, h: H, m: u32, w: usize, l: isize) -> bool {
@@ -196,7 +224,7 @@ fn handle_menu_command(plugin: &Plugin, h: H, m: u32, w: usize, l: isize) -> boo
     #[cfg(test)]
     let result = queued_menu_tests::launch_result();
     if let Err(e) = result {
-        unsafe { MessageBoxW(h, wide(&e).as_ptr(), wide("Nexa Camera").as_ptr(), 0x10); }
+        unsafe { MessageBoxW(h, wide(&e).as_ptr(), wide("Nexa Blend Camera").as_ptr(), 0x10); }
     }
     true
 }
@@ -239,3 +267,19 @@ unsafe extern "system" fn keyboard(this:*mut Plugin,w:usize,l:isize){unsafe{reco
 #[cfg(feature="abi-audit")] #[unsafe(no_mangle)] pub unsafe extern "C" fn nexa_abi_slot(p:*const Plugin)->u32{unsafe{(*p).trace_slot.load(Ordering::Relaxed)}}
 #[cfg(feature="abi-audit")] #[unsafe(no_mangle)] pub unsafe extern "C" fn nexa_abi_digest(p:*const Plugin)->u64{unsafe{(*p).trace_digest.load(Ordering::Relaxed)}}
 #[cfg(feature="abi-audit")] #[unsafe(no_mangle)] pub unsafe extern "C" fn nexa_abi_window(p:*mut Plugin,h:H){unsafe{(*p).window.store(h as isize,Ordering::Relaxed);}}
+
+#[cfg(test)] mod locale_tests{
+    use super::*;
+    unsafe extern "C" fn english()->bool{true}
+    unsafe extern "C" fn japanese()->bool{false}
+    #[test] fn exported_language_fallback_and_worker_propagation(){
+        assert_eq!(language_from_export(None),Language::Ja);
+        assert_eq!(language_from_export(Some(japanese)),Language::Ja);
+        assert_eq!(language_from_export(Some(english)),Language::En);
+        for language in [Language::Ja,Language::En]{
+            let args=worker_args(language).map(OsString::from);
+            let parsed=i18n::GuiArgs::parse(&args).unwrap().unwrap();
+            assert_eq!(parsed.language,language);assert!(parsed.plugin_result);
+        }
+    }
+}

@@ -3,7 +3,7 @@ use super::*;
 use std::{io::Read, path::Path, sync::{Arc,atomic::{AtomicBool,AtomicUsize}},os::windows::io::AsRawHandle};
 
 static NEXT:AtomicUsize=AtomicUsize::new(1);
-pub(super) struct Pending {window:usize,token:usize,result:Option<Result<Option<PathBuf>,String>>,cancelled:Arc<AtomicBool>}
+pub(super) struct Pending {window:usize,token:usize,result:Option<Result<Option<PathBuf>,String>>,cancelled:Arc<AtomicBool>,language:Language}
 impl Drop for Pending {fn drop(&mut self){self.cancelled.store(true,Ordering::Relaxed);}}
 #[link(name="user32")] unsafe extern "system" {
     fn PostMessageW(h:H,m:u32,w:usize,l:isize)->i32;
@@ -22,11 +22,11 @@ impl Drop for Pending {fn drop(&mut self){self.cancelled.store(true,Ordering::Re
 pub(super) fn message_id()->u32 {
     unsafe{RegisterWindowMessageW(wide("Nexa.Camera.ConversionCompleted.v1").as_ptr())}
 }
-pub(super) fn start(window:H,mut child:Child)->Result<Pending,String>{
+pub(super) fn start(window:H,mut child:Child,language:Language)->Result<Pending,String>{
     let token=NEXT.fetch_add(1,Ordering::Relaxed);
     let window=window as usize;
     let message=message_id();
-    let mut stdout=child.stdout.take().ok_or("worker completion pipe unavailable")?;
+    let mut stdout=child.stdout.take().ok_or(language.text(Text::CompletionPipe))?;
     let cancelled=Arc::new(AtomicBool::new(false));let signal=Arc::clone(&cancelled);
     std::thread::Builder::new().name("nexa-camera-completion".into()).spawn(move||{
         // Read only available pipe bytes; cancellation never waits for Blender/GUI exit.
@@ -36,15 +36,15 @@ pub(super) fn start(window:H,mut child:Child)->Result<Pending,String>{
             let mut available=0;
             let open=unsafe{PeekNamedPipe(stdout.as_raw_handle(),null_mut(),0,null_mut(),&mut available,null_mut())}!=0;
             if open&&available>0{
-                if bytes.len()+available as usize>131_072{break Err("変換完了通知が大きすぎます。".into());}
+                if bytes.len()+available as usize>131_072{break Err(language.text(Text::CompletionLarge).into());}
                 let mut buffer=vec![0u8;(available as usize).min(8192)];
-                match stdout.read(&mut buffer){Ok(0)=>{},Ok(n)=>bytes.extend_from_slice(&buffer[..n]),Err(e)=>break Err(e.to_string())}
+                match stdout.read(&mut buffer){Ok(0)=>{},Ok(n)=>bytes.extend_from_slice(&buffer[..n]),Err(e)=>break Err(external(language,Text::Io,e))}
                 continue;
             }
             match child.try_wait(){
-                Ok(Some(status))=>break if status.success(){parse_result(&bytes)}else{Err("変換に失敗しました。VMDの自動読み込みは行っていません。".into())},
+                Ok(Some(status))=>break if status.success(){parse_result(&bytes,language)}else{Err(language.text(Text::ConversionFailed).into())},
                 Ok(None)=>std::thread::park_timeout(std::time::Duration::from_millis(50)),
-                Err(e)=>break Err(e.to_string()),
+                Err(e)=>break Err(external(language,Text::Io,e)),
             }
         };
         if let Ok(mut current)=WORKER.lock(){
@@ -53,8 +53,8 @@ pub(super) fn start(window:H,mut child:Child)->Result<Pending,String>{
                 if unsafe{PostMessageW(window as H,message,token,0)}==0{*current=None;}
             }
         }
-    }).map_err(|e|format!("completion monitor: {e}"))?;
-    Ok(Pending{window,token,result:None,cancelled})
+    }).map_err(|e|external(language,Text::CompletionMonitor,e))?;
+    Ok(Pending{window,token,result:None,cancelled,language})
 }
 pub(super) fn cancel(window:H){
     if let Ok(mut p)=WORKER.lock(){if p.as_ref().is_some_and(|p|p.window==window as usize){*p=None;}}
@@ -64,42 +64,45 @@ fn take_result(p:&mut Option<Pending>,window:usize,token:usize)->Option<Result<O
     p.take().and_then(|mut p|p.result.take())
 }
 pub(super) fn complete(window:H,token:usize)->bool{
-    let result=WORKER.lock().ok().and_then(|mut p|take_result(&mut p,window as usize,token));
-    let Some(result)=result else{return false;};
+    let result=WORKER.lock().ok().and_then(|mut p|{
+        let language=p.as_ref()?.language;
+        take_result(&mut p,window as usize,token).map(|result|(language,result))
+    });
+    let Some((language,result))=result else{return false;};
     let (outcome,path)=match result{
-        Ok(Some(path))=>(validate_camera(&path).and_then(|_|deliver(window,&path)),Some(path)),
+        Ok(Some(path))=>(validate_camera(&path,language).and_then(|_|deliver(window,&path,language)),Some(path)),
         Ok(None)=>return true,
         Err(e)=>(Err(e),None),
     };
     let (text,flags)=match outcome {
-        Ok(())=>("変換したカメラVMDをMMDの標準読み込み経路へ渡しました。\nタイムラインと構図を確認してください。".to_owned(),0x40),
+        Ok(())=>(language.text(Text::Delivered).to_owned(),0x40),
         Err(e)=>{
-            let saved=path.filter(|p|p.is_file()).map(|p|format!("\n変換済みVMD: {}\n標準のモーション読み込みを使用できます。",p.display())).unwrap_or_default();
-            (format!("自動読み込みを完了できませんでした。\n{e}{saved}"),0x10)
+            let saved=path.filter(|p|p.is_file()).map(|p|language.format(Text::SavedVmd,&[("path",&p.display().to_string())])).unwrap_or_default();
+            (language.format(Text::DeliveryFailed,&[("detail",&e),("saved",&saved)]),0x10)
         },
     };
-    if unsafe{IsWindow(window)}!=0{unsafe{MessageBoxW(window,wide(&text).as_ptr(),wide("Nexa Camera").as_ptr(),flags);}}
+    if unsafe{IsWindow(window)}!=0{unsafe{MessageBoxW(window,wide(&text).as_ptr(),wide("Nexa Blend Camera").as_ptr(),flags);}}
     true
 }
-fn parse_result(bytes:&[u8])->Result<Option<PathBuf>,String>{
+fn parse_result(bytes:&[u8],language:Language)->Result<Option<PathBuf>,String>{
     if bytes==b"NEXACANCEL1"{return Ok(None);}
-    if bytes.len()>131_072||!bytes.starts_with(b"NEXAVMD1\n"){return Err("不正な変換完了通知です。".into());}
-    let path=std::str::from_utf8(&bytes[9..]).map_err(|_|"完了通知のパスが不正です。")?;
+    if bytes.len()>131_072||!bytes.starts_with(b"NEXAVMD1\n"){return Err(language.text(Text::CompletionInvalid).into());}
+    let path=std::str::from_utf8(&bytes[9..]).map_err(|_|language.text(Text::CompletionPath))?;
     let path=PathBuf::from(path);
     if !path.is_absolute()||path.as_os_str().is_empty()||path.to_string_lossy().contains('\0'){
-        return Err("完了通知には絶対パスが必要です。".into());
+        return Err(language.text(Text::AbsolutePath).into());
     }
     Ok(Some(path))
 }
-fn validate_camera(path:&Path)->Result<(),String>{
-    if !path.extension().is_some_and(|s|s.eq_ignore_ascii_case("vmd")){return Err("出力がVMDではありません。".into());}
-    let metadata=std::fs::symlink_metadata(path).map_err(|e|e.to_string())?;
-    if !metadata.is_file()||metadata.file_type().is_symlink()||metadata.len()>8_000_000{return Err("通常のカメラVMDファイルではありません。".into());}
-    let bytes=std::fs::read(path).map_err(|e|e.to_string())?;
-    validate_bytes(&bytes)
+fn validate_camera(path:&Path,language:Language)->Result<(),String>{
+    if !path.extension().is_some_and(|s|s.eq_ignore_ascii_case("vmd")){return Err(language.text(Text::NotVmd).into());}
+    let metadata=std::fs::symlink_metadata(path).map_err(|e|external(language,Text::Io,e))?;
+    if !metadata.is_file()||metadata.file_type().is_symlink()||metadata.len()>8_000_000{return Err(language.text(Text::NotRegularVmd).into());}
+    let bytes=std::fs::read(path).map_err(|e|external(language,Text::Io,e))?;
+    validate_bytes(&bytes,language)
 }
-fn validate_bytes(b:&[u8])->Result<(),String>{
-    let invalid=||"生成ファイルがcamera-only VMD形式ではありません。".to_owned();
+fn validate_bytes(b:&[u8],language:Language)->Result<(),String>{
+    let invalid=||language.text(Text::CameraOnly).to_owned();
     if b.len()<74||&b[..25]!=b"Vocaloid Motion Data 0002"||b[50..58]!=[0;8]{return Err(invalid());}
     let n=u32::from_le_bytes(b[58..62].try_into().unwrap()) as usize;
     if n==0||n>108_001||b.len()!=74+n*61||b[62+n*61..]!=[0;12]{return Err(invalid());}
@@ -123,25 +126,25 @@ unsafe extern "system" fn find_context(h:H,data:isize)->i32{
     let copied=unsafe{SendMessageW(h,0x148,0,label.as_mut_ptr() as isize)};
     if copied!=n{return 1;}
     let label=String::from_utf16_lossy(&label[..n as usize]);
-    if label=="camera/light/accessory"||label=="カメラ・照明・アクセサリ"{
+    if label=="camera/light/accessory"||label=="カメラ・照明・アクセサリ"||label=="ｶﾒﾗ･照明･ｱｸｾｻﾘ"{
         let context=unsafe{&mut *(data as *mut Context)};
         context.candidates+=1;context.camera=unsafe{SendMessageW(h,0x147,0,0)}==0;
     }
     1
 }
-fn deliver(window:H,path:&Path)->Result<(),String>{
-    if unsafe{IsWindow(window)}==0||unsafe{IsWindowEnabled(window)}==0{return Err("MMDが閉じられているか、別のダイアログが開いています。".into());}
+fn deliver(window:H,path:&Path,language:Language)->Result<(),String>{
+    if unsafe{IsWindow(window)}==0||unsafe{IsWindowEnabled(window)}==0{return Err(language.text(Text::HostUnavailable).into());}
     let mut context=Context{candidates:0,camera:false};
     unsafe{EnumChildWindows(window,find_context,&mut context as *mut Context as isize);}
-    if context.candidates!=1||!context.camera{return Err("MMDをカメラ・照明・アクセサリ操作に切り替えてください。".into());}
+    if context.candidates!=1||!context.camera{return Err(language.text(Text::CameraMode).into());}
     use std::os::windows::ffi::OsStrExt;
     let path:Vec<u16>=path.as_os_str().encode_wide().chain([0,0]).collect();
-    if path.len()>32768{return Err("パスが長すぎます。".into());}
+    if path.len()>32768{return Err(language.text(Text::PathLong).into());}
     unsafe{
         let memory=GlobalAlloc(0x42,20+path.len()*2);
-        if memory.is_null(){return Err("ファイル通知のメモリを確保できません。".into());}
+        if memory.is_null(){return Err(language.text(Text::AllocateDrop).into());}
         let data=GlobalLock(memory).cast::<u8>();
-        if data.is_null(){GlobalFree(memory);return Err("ファイル通知を作成できません。".into());}
+        if data.is_null(){GlobalFree(memory);return Err(language.text(Text::LockDrop).into());}
         data.cast::<u32>().write(20);data.add(16).cast::<u32>().write(1);
         std::ptr::copy_nonoverlapping(path.as_ptr(),data.add(20).cast::<u16>(),path.len());
         GlobalUnlock(memory);
@@ -151,33 +154,82 @@ fn deliver(window:H,path:&Path)->Result<(),String>{
     Ok(())
 }
 
+#[cfg(test)] mod native_context_tests {
+    use super::*;
+    #[link(name="user32")] unsafe extern "system" {
+        fn CreateWindowExW(ex:u32,c:*const u16,t:*const u16,s:u32,x:i32,y:i32,w:i32,height:i32,p:H,m:H,i:H,a:*mut c_void)->H;
+        fn DestroyWindow(h:H)->i32;
+    }
+    struct TestWindow(H);
+    impl TestWindow {
+        fn new()->Self{
+            let h=unsafe{CreateWindowExW(0,wide("STATIC").as_ptr(),wide("NexaCameraContextTest").as_ptr(),0,0,0,300,160,null_mut(),null_mut(),GetModuleHandleW(null()),null_mut())};
+            assert!(!h.is_null());Self(h)
+        }
+        fn combo(&self,label:&str,selected:usize){
+            let h=unsafe{CreateWindowExW(0,wide("COMBOBOX").as_ptr(),null(),0x40000003,0,0,280,120,self.0,null_mut(),GetModuleHandleW(null()),null_mut())};
+            assert!(!h.is_null());
+            assert_eq!(unsafe{SendMessageW(h,0x143,0,wide(label).as_ptr() as isize)},0);
+            assert_eq!(unsafe{SendMessageW(h,0x143,0,wide("model").as_ptr() as isize)},1);
+            assert_eq!(unsafe{SendMessageW(h,0x14e,selected,0)},selected as isize);
+        }
+        fn scan(&self)->Context{
+            let mut context=Context{candidates:0,camera:false};
+            unsafe{EnumChildWindows(self.0,find_context,&mut context as *mut Context as isize);}
+            context
+        }
+    }
+    impl Drop for TestWindow{fn drop(&mut self){unsafe{DestroyWindow(self.0);}}}
+    #[test] fn native_camera_combo_labels_and_guards(){
+        // All controls belong to invisible test windows; no host input or file delivery.
+        let path=Path::new("C:/camera.vmd");
+        for label in ["ｶﾒﾗ･照明･ｱｸｾｻﾘ","camera/light/accessory","カメラ・照明・アクセサリ"]{
+            for selected in [0,1]{
+                let window=TestWindow::new();window.combo(label,selected);
+                let context=window.scan();assert_eq!(context.candidates,1,"{label}");assert_eq!(context.camera,selected==0,"{label}");
+                if selected==1{assert_eq!(deliver(window.0,path,Language::Ja).unwrap_err(),Language::Ja.text(Text::CameraMode));}
+            }
+        }
+        for label in ["unknown","ｶﾒﾗ･照明･ｱｸｾｻﾘ (unknown)","camera/light/accessory extra"]{
+            let window=TestWindow::new();window.combo(label,0);
+            let context=window.scan();assert_eq!(context.candidates,0);assert!(!context.camera);
+            assert_eq!(deliver(window.0,path,Language::En).unwrap_err(),Language::En.text(Text::CameraMode));
+        }
+        let window=TestWindow::new();window.combo("ｶﾒﾗ･照明･ｱｸｾｻﾘ",0);window.combo("camera/light/accessory",0);
+        let context=window.scan();assert_eq!(context.candidates,2);
+        assert_eq!(deliver(window.0,path,Language::Ja).unwrap_err(),Language::Ja.text(Text::CameraMode));
+    }
+}
+
 #[cfg(test)] mod tests {
     use super::*;
     #[test] fn completion_is_bound_and_consumed_once(){
         let signal=Arc::new(AtomicBool::new(false));
-        let mut p=Some(Pending{window:1,token:42,result:Some(Ok(Some(PathBuf::from("C:/camera.vmd")))),cancelled:Arc::clone(&signal)});
+        let mut p=Some(Pending{window:1,token:42,result:Some(Ok(Some(PathBuf::from("C:/camera.vmd")))),cancelled:Arc::clone(&signal),language:Language::Ja});
         assert!(take_result(&mut p,2,42).is_none());assert!(take_result(&mut p,1,41).is_none());
         assert!(take_result(&mut p,1,42).unwrap().unwrap().is_some());assert!(take_result(&mut p,1,42).is_none());assert!(signal.load(Ordering::Relaxed));
         let signal=Arc::new(AtomicBool::new(false));
-        let mut p=Some(Pending{window:1,token:43,result:None,cancelled:Arc::clone(&signal)});assert!(take_result(&mut p,1,43).is_none());
+        let mut p=Some(Pending{window:1,token:43,result:None,cancelled:Arc::clone(&signal),language:Language::Ja});assert!(take_result(&mut p,1,43).is_none());
         p=None;assert!(take_result(&mut p,1,43).is_none());
         assert!(signal.load(Ordering::Relaxed));
     }
     #[test] fn cancellation_and_foreign_stdout_cannot_supply_a_path(){
-        assert_eq!(parse_result(b"NEXACANCEL1").unwrap(),None);
-        assert!(parse_result(b"Camera VMD: C:/foreign.vmd").is_err());
-        assert!(parse_result(b"NEXAVMD1\nrelative.vmd").is_err());
-        assert!(parse_result(b"NEXAVMD1\nC:/a\0.vmd").is_err());
-        assert!(parse_result(b"NEXAVMD1\nC:/camera.vmd").unwrap().is_some());
-        let mut p=Some(Pending{window:1,token:1,result:Some(Err("failed".into())),cancelled:Arc::new(AtomicBool::new(false))});
+        for language in [Language::Ja,Language::En]{
+            assert_eq!(parse_result(b"NEXACANCEL1",language).unwrap(),None);
+            assert_eq!(parse_result(b"Camera VMD: C:/foreign.vmd",language).unwrap_err(),language.text(Text::CompletionInvalid));
+            assert!(parse_result(b"NEXAVMD1\nrelative.vmd",language).is_err());
+            assert!(parse_result(b"NEXAVMD1\nC:/a\0.vmd",language).is_err());
+            assert!(parse_result(b"NEXAVMD1\nC:/camera.vmd",language).unwrap().is_some());
+        }
+        let mut p=Some(Pending{window:1,token:1,result:Some(Err("failed".into())),cancelled:Arc::new(AtomicBool::new(false)),language:Language::En});
         assert!(take_result(&mut p,1,1).unwrap().is_err());
     }
     #[test] fn camera_validation_rejects_model_light_and_truncated_records(){
         let mut b=vec![0;135];b[..25].copy_from_slice(b"Vocaloid Motion Data 0002");
         b[58..62].copy_from_slice(&1u32.to_le_bytes());b[118..122].copy_from_slice(&40u32.to_le_bytes());
-        assert!(validate_bytes(&b).is_ok());
-        b[50]=1;assert!(validate_bytes(&b).is_err());b[50]=0;
-        b[123]=1;assert!(validate_bytes(&b).is_err());b[123]=0;
-        b.pop();assert!(validate_bytes(&b).is_err());
+        assert!(validate_bytes(&b,Language::Ja).is_ok());
+        b[50]=1;assert!(validate_bytes(&b,Language::Ja).is_err());b[50]=0;
+        b[123]=1;assert!(validate_bytes(&b,Language::En).is_err());b[123]=0;
+        b.pop();assert!(validate_bytes(&b,Language::En).is_err());
     }
 }

@@ -48,7 +48,7 @@ fn verify_projection(s:&CameraSample,key:crate::vmd::CameraKey) {
             let fy=1.0/(f64::from(key.fov_deg).to_radians()/2.0).tan();
             (fy/(16.0/9.0)*dot(right,delta)/dot(forward,delta),fy*dot(up,delta)/dot(forward,delta))
         }else {
-            let h=(5.0/9.0)*f64::from(key.distance).abs();
+            let h=f64::from(key.distance).abs()/(16.0/9.0);
             (2.0/(h*16.0/9.0)*dot(right,delta),2.0/h*dot(up,delta))
         };
         let (expected_x,expected_y)=if key.perspective {
@@ -118,5 +118,25 @@ fn v142_range_container_boundaries() {
     for count in [0u32,108002] {
         let mut bad=data.clone();bad[8..12].copy_from_slice(&count.to_le_bytes());
         assert!(crate::range::decode_range(&bad).is_err());
+    }
+}
+
+#[test]
+fn v146_orthographic_distance_matches_mmd_width_at_multiple_aspects() {
+    // Native MMD width/distance diagnosis at 1920x1080 and 1600x1200.
+    for (viewport, expected_width) in [([1920,1080],1600.0/9.0),([1600,1200],400.0/3.0),([1080,1080],100.0)] {
+        let mut s=fixture([0.3,-0.4,0.7],true,40.0);
+        let aspect=f64::from(viewport[0])/f64::from(viewport[1]);
+        s.matrix_projection[0][0]=s.matrix_projection[1][1]/aspect;
+        s.resolution=viewport;
+        let mut opt=options();opt.viewport=viewport;
+        let key=convert_sample(&s,0,opt,None).unwrap().key;
+        assert!((f64::from(key.distance)+expected_width).abs()<1e-4);
+        assert!(!key.perspective);
+        let angles=key.rotation.map(f64::from);
+        let forward=apply([0.0,0.0,1.0],angles);
+        let eye:[f64;3]=std::array::from_fn(|i|f64::from(key.center[i])+f64::from(key.distance)*forward[i]);
+        let expected_eye=[15.625,43.75,-25.0];
+        for i in 0..3 {assert!((eye[i]-expected_eye[i]).abs()<1e-4);}
     }
 }

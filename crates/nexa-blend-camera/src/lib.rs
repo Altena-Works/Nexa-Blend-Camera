@@ -299,3 +299,5 @@ pub mod gui;
 pub mod blender_detection;
 #[cfg(test)]
 mod conversion_tests;
+
+pub mod i18n;

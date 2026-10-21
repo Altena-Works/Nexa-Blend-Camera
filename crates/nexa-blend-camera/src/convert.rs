@@ -1,5 +1,5 @@
 //! Blender evaluated camera to MMD/VMD coordinates (column-vector convention).
-use crate::{CameraKind, CameraSample};
+use crate::{CameraKind, CameraSample, i18n::{Language, Text}};
 use crate::vmd::CameraKey;
 
 #[derive(Clone, Copy, Debug)]
@@ -20,12 +20,12 @@ pub struct Conversion {
     pub required_aspect: f64,
 }
 #[derive(Clone, Debug, PartialEq)]
-pub struct ConvertError(pub &'static str);
+pub struct ConvertError(pub Text);
 impl std::fmt::Display for ConvertError {
-    fn fmt(&self,f:&mut std::fmt::Formatter<'_>)->std::fmt::Result {f.write_str(self.0)}
+    fn fmt(&self,f:&mut std::fmt::Formatter<'_>)->std::fmt::Result {f.write_str(Language::En.text(self.0))}
 }
 impl std::error::Error for ConvertError {}
-fn fail<T>(s:&'static str)->Result<T,ConvertError>{Err(ConvertError(s))}
+fn fail<T>(s:Text)->Result<T,ConvertError>{Err(ConvertError(s))}
 fn dot(a:[f64;3],b:[f64;3])->f64 {a.iter().zip(b).map(|(x,y)|x*y).sum()}
 fn cross(a:[f64;3],b:[f64;3])->[f64;3] {
     [a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]]
@@ -55,7 +55,7 @@ fn angles(r:[[f64;3];3], previous:Option<[f64;3]>)->[f64;3] {
 }
 fn f32_checked(value:f64)->Result<f32,ConvertError> {
     let result=value as f32;
-    if !result.is_finite() {return fail("camera value cannot be represented as VMD f32");}
+    if !result.is_finite() {return fail(Text::F32);}
     Ok(result)
 }
 pub fn convert_sample(sample:&CameraSample, frame:u32, options:ConvertOptions,
@@ -63,19 +63,19 @@ pub fn convert_sample(sample:&CameraSample, frame:u32, options:ConvertOptions,
 {
     let k=options.units_per_meter*sample.unit_scale;
     if !k.is_finite() || k<=0.0 || options.viewport.contains(&0) {
-        return fail("positive finite units and nonzero viewport are required");
+        return fail(Text::ConvertUnits);
     }
-    if previous.is_some_and(|p|p.iter().any(|v|!v.is_finite())) {return fail("invalid previous rotation");}
+    if previous.is_some_and(|p|p.iter().any(|v|!v.is_finite())) {return fail(Text::PreviousRotation);}
     if sample.matrix_world.iter().flatten().chain(sample.matrix_projection.iter().flatten()).any(|v|!v.is_finite()) {
-        return fail("non-finite camera matrix");
+        return fail(Text::MatrixFinite);
     }
     let w=sample.matrix_world;
-    if !(0..4).all(|i|near(w[3][i],if i==3 {1.0}else{0.0})) {return fail("non-affine camera matrix");}
+    if !(0..4).all(|i|near(w[3][i],if i==3 {1.0}else{0.0})) {return fail(Text::MatrixAffine);}
     let axes:[ [f64;3];3]=std::array::from_fn(|j|std::array::from_fn(|i|w[i][j]));
     if !(0..3).all(|i|near(dot(axes[i],axes[i]),1.0))
         || !(0..3).all(|i|(0..i).all(|j|near(dot(axes[i],axes[j]),0.0)))
         || !near(dot(cross(axes[0],axes[1]),axes[2]),1.0) {
-        return fail("scaled, sheared or reflected camera transforms are unsupported");
+        return fail(Text::MatrixRigid);
     }
     // Remove only the already bounded floating-point orthogonality noise.
     let right=normalize(axes[0]);
@@ -85,34 +85,35 @@ pub fn convert_sample(sample:&CameraSample, frame:u32, options:ConvertOptions,
     let map=[0,2,1];
     let r:[[f64;3];3]=std::array::from_fn(|i|std::array::from_fn(|j|b[j][map[i]]*if j==2 {-1.0}else{1.0}));
     let eye=[k*w[0][3],k*w[2][3],k*w[1][3]];
-    if sample.shift_x!=0.0 || sample.shift_y!=0.0 {return fail("lens shift/off-axis projection cannot be represented by VMD");}
+    if sample.shift_x!=0.0 || sample.shift_y!=0.0 {return fail(Text::LensShift);}
     let p=sample.matrix_projection;
     let perspective=sample.kind==CameraKind::Perspective;
     for (i,row) in p.iter().enumerate() {
         for (j,value) in row.iter().enumerate() {
             let allowed=matches!((i,j),(0,0)|(1,1)|(2,2)|(2,3))
                 || if perspective {(i,j)==(3,2)}else{(i,j)==(3,3)};
-            if !allowed && value.abs()>1e-6 {return fail("unsupported off-axis camera projection");}
+            if !allowed && value.abs()>1e-6 {return fail(Text::OffAxis);}
         }
     }
     if p[0][0]<=0.0 || p[1][1]<=0.0 || p[2][2]>=0.0
         || if perspective {!near(p[3][2],-1.0)}else{!near(p[3][3],1.0)} {
-        return fail("unsupported camera projection matrix");
+        return fail(Text::Projection);
     }
     let aspect=p[1][1]/p[0][0];
     let output_aspect=options.viewport[0] as f64/options.viewport[1] as f64;
     if !aspect.is_finite() || (aspect/output_aspect-1.0).abs()>1e-5 {
-        return fail("output width/height does not match the evaluated Blender camera aspect");
+        return fail(Text::Aspect);
     }
     let rotation=angles(r,previous);
     let exact_fov_deg=if perspective {2.0*(1.0/p[1][1]).atan().to_degrees()}else{30.0};
     let fov=exact_fov_deg.round();
-    if !(1.0..=135.0).contains(&fov) {return fail("supported MMD vertical FOV is 1..135 degrees");}
+    if !(1.0..=135.0).contains(&fov) {return fail(Text::FovRange);}
     let approximated=perspective && (fov-exact_fov_deg).abs()>1e-4;
     if approximated && !options.allow_fov_approximation {
-        return fail("noninteger VMD FOV requires explicit approximation permission");
+        return fail(Text::FovPermission);
     }
-    let distance=if perspective {0.0}else{-(9.0/5.0)*k*2.0/p[1][1]};
+    // MMD orthographic view width is |distance|.
+    let distance=if perspective {0.0}else{-k*2.0/p[0][0]};
     let center: [f64;3]=std::array::from_fn(|i|eye[i]-distance*r[i][2]);
     let written_fy=1.0/(fov.to_radians()/2.0).tan();
     let edge_error_px=if perspective {[
